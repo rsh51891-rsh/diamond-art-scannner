@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Symbol Finder">
+<meta name="theme-color" content="#111318">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>Symbol Finder</title>
+<style>
+  :root {
+    --bg: #111318;
+    --panel: #1b1e25;
+    --line: #2c313b;
+    --text: #e8eaee;
+    --muted: #9aa1ad;
+    --accent: #ff2bd6;
+    --accent2: #22e3ff;
+    --btn: #2a2f3a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; overflow: hidden;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+  header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; flex: 1; font-weight: 600; }
+  button, label.btn { appearance: none; border: 0; border-radius: 10px; background: var(--btn); color: var(--text);
+    font: inherit; font-weight: 600; padding: 9px 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  button.primary, label.btn.primary { background: var(--accent); color: #fff; }
+  button:disabled { opacity: .4; }
+  #stage { position: relative; flex: 1; min-height: 0; touch-action: none; background: #000; }
+  #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; color: var(--muted); gap: 14px; }
+  #empty ol { text-align: left; margin: 0; padding-left: 20px; max-width: 320px; }
+  #busy { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: rgba(0,0,0,.75);
+    padding: 6px 12px; border-radius: 20px; font-size: 13px; display: none; }
+  #panel { border-top: 1px solid var(--line); background: var(--panel);
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); display: grid; gap: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  #tpl { width: 64px; height: 64px; border-radius: 8px; background: #000; border: 2px solid var(--accent2);
+    image-rendering: pixelated; flex: none; }
+  #status { flex: 1; font-size: 14px; color: var(--muted); }
+  #status b { color: var(--text); font-size: 20px; }
+  .nudge { display: grid; grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 26px); gap: 2px; flex: none; }
+  .nudge button { padding: 0; justify-content: center; border-radius: 6px; font-size: 13px; }
+  .slider { display: grid; grid-template-columns: 82px 1fr 40px; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .slider span:last-child { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Symbol Finder</h1>
+  <button id="fitBtn" disabled>Fit</button>
+  <label class="btn primary" for="file">Photo</label>
+  <input id="file" type="file" accept="image/*">
+</header>
+
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div id="empty">
+    <div style="font-size:42px">◆</div>
+    <ol>
+      <li>Tap <b>Photo</b> and photograph the canvas, straight-on, with minimal glare.</li>
+      <li>Pinch to zoom, drag to pan.</li>
+      <li>Tap one example of the symbol you want.</li>
+      <li>Tap <b>Find</b>. Every matching symbol is circled.</li>
+    </ol>
+  </div>
+  <div id="busy">Working…</div>
+</div>
+
+<div id="panel">
+  <div class="row">
+    <canvas id="tpl" width="64" height="64"></canvas>
+    <div id="status">Load a photo to start.</div>
+    <div class="nudge" id="nudge">
+      <span></span><button data-d="0,-1">▲</button><span></span>
+      <button data-d="-1,0">◀</button><button data-d="0,0" title="Re-center">●</button><button data-d="1,0">▶</button>
+      <span></span><button data-d="0,1">▼</button><span></span>
+    </div>
+  </div>
+  <div class="slider"><span>Match ≥</span><input id="thr" type="range" min="0.30" max="0.95" step="0.01" value="0.60"><span id="thrV">0.60</span></div>
+  <div class="slider"><span>Box size</span><input id="box" type="range" min="0.5" max="1.2" step="0.05" value="0.85"><span id="boxV">0.85</span></div>
+  <div class="row">
+    <button id="findBtn" class="primary" style="flex:1;justify-content:center" disabled>Find</button>
+    <button id="clearBtn" disabled>Clear</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------------------
+// Matching core (runs in a Web Worker). Normalized cross-correlation of a
+// grayscale template against the working image, then non-max suppression on
+// a radius tied to the detected grid pitch.
+// ---------------------------------------------------------------------------
+const workerSrc = `
+self.onmessage = (e) => {
+  const { gray, W, H, tpl, tw, th, nmsR, floor } = e.data;
+  const n = tw * th;
+  // zero-mean template, its L2 norm
+  let tm = 0; for (let i = 0; i < n; i++) tm += tpl[i]; tm /= n;
+  const t = new Float32Array(n); let tn = 0;
+  for (let i = 0; i < n; i++) { t[i] = tpl[i] - tm; tn += t[i] * t[i]; }
+  tn = Math.sqrt(tn);
+  // integral images of I and I^2
+  const W1 = W + 1;
+  const S = new Float64Array(W1 * (H + 1)), S2 = new Float64Array(W1 * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let rs = 0, rs2 = 0;
+    for (let x = 0; x < W; x++) {
+      const v = gray[y * W + x]; rs += v; rs2 += v * v;
+      S[(y + 1) * W1 + x + 1] = S[y * W1 + x + 1] + rs;
+      S2[(y + 1) * W1 + x + 1] = S2[y * W1 + x + 1] + rs2;
+    }
+  }
+  const RW = W - tw + 1, RH = H - th + 1;
+  const R = new Float32Array(RW * RH);
+  const minVar = 0.01 * n; // skip flat windows
+  for (let y = 0; y < RH; y++) {
+    for (let x = 0; x < RW; x++) {
+      const a = y * W1 + x, b = a + tw, c = (y + th) * W1 + x, d = c + tw;
+      const s = S[d] - S[b] - S[c] + S[a];
+      const s2 = S2[d] - S2[b] - S2[c] + S2[a];
+      const v = s2 - s * s / n;
+      if (v < minVar) { R[y * RW + x] = 0; continue; }
+      let acc = 0, k = 0;
+      for (let j = 0; j < th; j++) {
+        let p = (y + j) * W + x;
+        for (let i = 0; i < tw; i++) acc += gray[p++] * t[k++];
+      }
+      R[y * RW + x] = acc / (Math.sqrt(v) * tn);
+    }
+    if ((y & 31) === 0) self.postMessage({ progress: y / RH });
+  }
+  // non-max suppression
+  const peaks = [];
+  for (let y = 0; y < RH; y++) {
+    for (let x = 0; x < RW; x++) {
+      const r = R[y * RW + x];
+      if (r < floor) continue;
+      let isMax = true;
+      const y0 = Math.max(0, y - nmsR), y1 = Math.min(RH - 1, y + nmsR);
+      const x0 = Math.max(0, x - nmsR), x1 = Math.min(RW - 1, x + nmsR);
+      for (let yy = y0; yy <= y1 && isMax; yy++)
+        for (let xx = x0; xx <= x1; xx++) {
+          const q = R[yy * RW + xx];
+          if (q > r || (q === r && (yy < y || (yy === y && xx < x)))) { isMax = false; break; }
+        }
+      if (isMax) peaks.push(x + tw / 2, y + th / 2, r);
+    }
+  }
+  self.postMessage({ done: true, peaks: new Float32Array(peaks) });
+};`;
+const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const MAX_DISPLAY = 2400;     // longest side of the display bitmap
+const TARGET_PITCH = 22;      // grid pitch (px) used for matching
+const LCN_FRAC = 0.2;         // local-contrast window radius, fraction of pitch
+const $ = (id) => document.getElementById(id);
+const view = $('view'), vctx = view.getContext('2d');
+const tplC = $('tpl'), tctx = tplC.getContext('2d');
+
+let img = null;               // display canvas (image at display resolution)
+let pitchD = 0;               // grid pitch in display px
+let work = null;              // { gray, W, H, s }  s = work px per display px
+let sel = null;               // selected cell center in display px {x, y}
+let matches = [];             // [{x, y, r}] in display px
+let cam = { s: 1, x: 0, y: 0 }; // screen = img * s + (x, y)  (CSS px)
+
+// ---------------------------------------------------------------------------
+// Image loading and preprocessing
+// ---------------------------------------------------------------------------
+$('file').addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  busy('Loading…');
+  try {
+    const bmp = await loadImage(f);
+    const k = Math.min(1, MAX_DISPLAY / Math.max(bmp.width, bmp.height));
+    img = document.createElement('canvas');
+    img.width = Math.round(bmp.width * k); img.height = Math.round(bmp.height * k);
+    img.getContext('2d').drawImage(bmp, 0, 0, img.width, img.height);
+    $('empty').style.display = 'none';
+    sel = null; matches = [];
+    pitchD = estimatePitch(img);
+    const s = Math.min(1, TARGET_PITCH / pitchD);
+    work = toGray(img, s);
+    work.gray = localNorm(work.gray, work.W, work.H, Math.max(2, Math.round(TARGET_PITCH * LCN_FRAC)));
+    $('fitBtn').disabled = false; $('clearBtn').disabled = false; $('findBtn').disabled = true;
+    fit(); drawTpl();
+    setStatus(`Grid pitch ≈ ${pitchD.toFixed(1)} px. Zoom in and tap a symbol.`);
+  } catch (err) {
+    setStatus('Could not read image: ' + err.message);
+  }
+  busy(false);
+  e.target.value = '';
+});
+
+function loadImage(file) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error('decode failed'));
+    im.src = URL.createObjectURL(file);
+  });
+}
+
+function toGray(src, s) {
+  const W = Math.max(1, Math.round(src.width * s)), H = Math.max(1, Math.round(src.height * s));
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(src, 0, 0, W, H);
+  const d = cx.getImageData(0, 0, W, H).data;
+  const gray = new Float32Array(W * H);
+  for (let i = 0, j = 0; i < gray.length; i++, j += 4) gray[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+  return { gray, W, H, s: W / src.width };
+}
+
+// Local contrast normalization: (g - mean_r) / std_r. Removes print tint,
+// lighting gradients and the flat fill of each cell so matching keys on strokes.
+function boxBlur(src, W, H, r) {
+  const W1 = W + 1, S = new Float64Array(W1 * (H + 1)), out = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) { let rs = 0; for (let x = 0; x < W; x++) { rs += src[y * W + x]; S[(y + 1) * W1 + x + 1] = S[y * W1 + x + 1] + rs; } }
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(H, y + r + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(W, x + r + 1);
+      out[y * W + x] = (S[y1 * W1 + x1] - S[y0 * W1 + x1] - S[y1 * W1 + x0] + S[y0 * W1 + x0]) / ((y1 - y0) * (x1 - x0));
+    }
+  }
+  return out;
+}
+function localNorm(g, W, H, r) {
+  const m = boxBlur(g, W, H, r), d = new Float32Array(W * H);
+  for (let i = 0; i < d.length; i++) { const v = g[i] - m[i]; d[i] = v * v; }
+  const v = boxBlur(d, W, H, r), out = new Float32Array(W * H);
+  for (let i = 0; i < out.length; i++) out[i] = (g[i] - m[i]) / (Math.sqrt(v[i]) + 6);
+  return out;
+}
+
+// Grid pitch from the autocorrelation of row/column gradient-energy profiles.
+function estimatePitch(src) {
+  const s = Math.min(1, 1000 / Math.max(src.width, src.height));
+  const { gray, W, H } = toGray(src, s);
+  const px = new Float64Array(W), py = new Float64Array(H);
+  for (let y = 1; y < H - 1; y++)
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      px[x] += Math.abs(gray[i + 1] - gray[i - 1]);
+      py[y] += Math.abs(gray[i + W] - gray[i - W]);
+    }
+  const best = (p) => {
+    const n = p.length; let m = 0; for (const v of p) m += v; m /= n;
+    const q = p.map(v => v - m);
+    // remove slow trend (moving-average high-pass)
+    const k = 15, hp = new Float64Array(n);
+    for (let i = 0; i < n; i++) { let a = 0, c = 0; for (let j = Math.max(0, i - k); j <= Math.min(n - 1, i + k); j++) { a += q[j]; c++; } hp[i] = q[i] - a / c; }
+    const maxLag = Math.min(120, n >> 2), ac = new Float64Array(maxLag + 1);
+    for (let L = 0; L <= maxLag; L++) { let a = 0; for (let i = 0; i + L < n; i++) a += hp[i] * hp[i + L]; ac[L] = a / (n - L); }
+    let L0 = 4; while (L0 < maxLag && ac[L0] > 0) L0++;           // first zero crossing
+    // local maxima; take the FIRST one that is close to the strongest, so a
+    // harmonic (2x, 3x pitch) that happens to be slightly higher is not chosen
+    const pk = [];
+    for (let L = L0; L < maxLag; L++) if (ac[L] > 0 && ac[L] > ac[L - 1] && ac[L] >= ac[L + 1]) pk.push(L);
+    if (!pk.length) return { lag: 0, q: 0 };
+    const gmax = Math.max(...pk.map(L => ac[L]));
+    const bl = pk.find(L => ac[L] >= 0.7 * gmax), bv = ac[bl];
+    // parabolic sub-sample refinement
+    const a = ac[bl - 1], b = ac[bl], c = ac[bl + 1], den = a - 2 * b + c;
+    return { lag: bl + (den !== 0 ? 0.5 * (a - c) / den : 0), q: bv / ac[0] };
+  };
+  const bx = best(px), by = best(py);
+  let lag;
+  if (bx.lag && by.lag && Math.abs(bx.lag - by.lag) / Math.max(bx.lag, by.lag) < 0.25) lag = (bx.lag + by.lag) / 2;
+  else lag = (bx.q >= by.q ? bx.lag : by.lag) || 30 * s;
+  return lag / s;
+}
+
+// ---------------------------------------------------------------------------
+// Selection: snap a tap to the symbol center (peak of blurred edge energy)
+// ---------------------------------------------------------------------------
+function snap(xd, yd) {
+  const { gray, W, H, s } = work;
+  const p = pitchD * s, R = Math.round(p * 0.45), b = Math.max(2, Math.round(p * 0.3));
+  const cx = Math.round(xd * s), cy = Math.round(yd * s);
+  let best = -1, bx = cx, by = cy;
+  for (let dy = -R; dy <= R; dy++)
+    for (let dx = -R; dx <= R; dx++) {
+      const x0 = cx + dx, y0 = cy + dy; let e = 0;
+      for (let y = y0 - b; y <= y0 + b; y++) {
+        if (y < 1 || y >= H - 1) continue;
+        for (let x = x0 - b; x <= x0 + b; x++) {
+          if (x < 1 || x >= W - 1) continue;
+          const i = y * W + x;
+          e += Math.abs(gray[i + 1] - gray[i - 1]) + Math.abs(gray[i + W] - gray[i - W]);
+        }
+      }
+      // mild preference for staying near the tap
+      e *= 1 - 0.25 * (dx * dx + dy * dy) / (R * R + 1);
+      if (e > best) { best = e; bx = x0; by = y0; }
+    }
+  return { x: bx / s, y: by / s };
+}
+
+function templateRect() {
+  const s = work.s, side = Math.max(5, Math.round(pitchD * s * +$('box').value));
+  const x = Math.round(sel.x * s - side / 2), y = Math.round(sel.y * s - side / 2);
+  return { x, y, w: side, h: side };
+}
+
+function drawTpl() {
+  tctx.fillStyle = '#000'; tctx.fillRect(0, 0, 64, 64);
+  if (!sel) return;
+  const side = pitchD * +$('box').value;
+  tctx.imageSmoothingEnabled = true;
+  tctx.drawImage(img, sel.x - side / 2, sel.y - side / 2, side, side, 0, 0, 64, 64);
+}
+
+// ---------------------------------------------------------------------------
+// Matching
+// ---------------------------------------------------------------------------
+$('findBtn').addEventListener('click', () => {
+  if (!sel) return;
+  const r = templateRect(), { gray, W, H, s } = work;
+  if (r.x < 0 || r.y < 0 || r.x + r.w > W || r.y + r.h > H) { setStatus('Selection is too close to the edge.'); return; }
+  const tpl = new Float32Array(r.w * r.h);
+  for (let j = 0; j < r.h; j++) for (let i = 0; i < r.w; i++) tpl[j * r.w + i] = gray[(r.y + j) * W + r.x + i];
+  busy('Searching… 0%');
+  $('findBtn').disabled = true;
+  worker.onmessage = (e) => {
+    if (e.data.progress !== undefined) { busy(`Searching… ${Math.round(e.data.progress * 100)}%`); return; }
+    const pk = e.data.peaks; matches = [];
+    for (let i = 0; i < pk.length; i += 3) matches.push({ x: pk[i] / s, y: pk[i + 1] / s, r: pk[i + 2] });
+    matches.sort((a, b) => b.r - a.r);
+    busy(false); $('findBtn').disabled = false;
+    updateStatus(); render();
+  };
+  worker.postMessage({ gray, W, H, tpl, tw: r.w, th: r.h, nmsR: Math.max(2, Math.round(pitchD * s * 0.5)), floor: 0.3 });
+});
+
+function visibleMatches() { const t = +$('thr').value; return matches.filter(m => m.r >= t); }
+function updateStatus() {
+  if (!matches.length) { setStatus(sel ? 'Tap Find to search for this symbol.' : 'Tap a symbol.'); return; }
+  setStatus(`<b>${visibleMatches().length}</b> matches. Adjust “Match ≥” if you see misses or false hits.`);
+}
+
+// ---------------------------------------------------------------------------
+// Rendering with pan / zoom
+// ---------------------------------------------------------------------------
+function resize() {
+  const r = view.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  view.width = Math.round(r.width * d); view.height = Math.round(r.height * d);
+  render();
+}
+function fit() {
+  if (!img) return;
+  const r = view.getBoundingClientRect();
+  const s = Math.min(r.width / img.width, r.height / img.height);
+  cam = { s, x: (r.width - img.width * s) / 2, y: (r.height - img.height * s) / 2 };
+  render();
+}
+function render() {
+  const d = window.devicePixelRatio || 1;
+  vctx.setTransform(1, 0, 0, 1, 0, 0);
+  vctx.fillStyle = '#000'; vctx.fillRect(0, 0, view.width, view.height);
+  if (!img) return;
+  vctx.setTransform(cam.s * d, 0, 0, cam.s * d, cam.x * d, cam.y * d);
+  vctx.imageSmoothingEnabled = cam.s < 2;
+  vctx.drawImage(img, 0, 0);
+  const lw = 2.5 / cam.s, rad = pitchD * 0.55;
+  // matches
+  vctx.lineWidth = lw;
+  const vis = visibleMatches();
+  for (const m of vis) {
+    vctx.beginPath(); vctx.arc(m.x, m.y, rad, 0, Math.PI * 2);
+    vctx.strokeStyle = 'rgba(0,0,0,.8)'; vctx.lineWidth = lw * 2.2; vctx.stroke();
+    vctx.strokeStyle = '#ff2bd6'; vctx.lineWidth = lw; vctx.stroke();
+  }
+  // selection box
+  if (sel) {
+    const side = pitchD * +$('box').value;
+    vctx.lineWidth = lw * 2.2; vctx.strokeStyle = 'rgba(0,0,0,.8)';
+    vctx.strokeRect(sel.x - side / 2, sel.y - side / 2, side, side);
+    vctx.lineWidth = lw; vctx.strokeStyle = '#22e3ff';
+    vctx.strokeRect(sel.x - side / 2, sel.y - side / 2, side, side);
+  }
+}
+
+// Pointer handling: one finger pans, two fingers pinch-zoom, short tap selects.
+const pts = new Map();
+let gesture = null;
+view.addEventListener('pointerdown', (e) => {
+  if (!img) return;
+  view.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+  gesture = startGesture(e.timeStamp);
+});
+view.addEventListener('pointermove', (e) => {
+  if (!pts.has(e.pointerId)) return;
+  pts.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+  const g = gesture, c = centroid(), s0 = g.cam.s;
+  if (pts.size >= 2) {
+    const k = spread() / (g.spread || 1);
+    const s = Math.min(40, Math.max(0.05, s0 * k));
+    cam.s = s;
+    cam.x = c.x - (g.c.x - g.cam.x) * (s / s0);
+    cam.y = c.y - (g.c.y - g.cam.y) * (s / s0);
+  } else {
+    cam.x = g.cam.x + c.x - g.c.x; cam.y = g.cam.y + c.y - g.c.y;
+  }
+  g.moved = Math.max(g.moved, Math.hypot(c.x - g.c.x, c.y - g.c.y));
+  if (pts.size >= 2) g.multi = true;
+  render();
+});
+const end = (e) => {
+  if (!pts.has(e.pointerId)) return;
+  const g = gesture;
+  pts.delete(e.pointerId);
+  if (pts.size === 0) {
+    if (!g.multi && g.moved < 8 && e.timeStamp - g.t < 500) tapAt(e.offsetX, e.offsetY);
+  } else gesture = startGesture(e.timeStamp, g); // re-anchor remaining finger
+};
+view.addEventListener('pointerup', end);
+view.addEventListener('pointercancel', end);
+view.addEventListener('wheel', (e) => {
+  if (!img) return; e.preventDefault();
+  const k = Math.exp(-e.deltaY * 0.0015), s = Math.min(40, Math.max(0.05, cam.s * k));
+  cam.x = e.offsetX - (e.offsetX - cam.x) * (s / cam.s);
+  cam.y = e.offsetY - (e.offsetY - cam.y) * (s / cam.s);
+  cam.s = s; render();
+}, { passive: false });
+
+function startGesture(t, prev) {
+  return { c: centroid(), spread: spread(), cam: { ...cam }, t: prev ? prev.t : t, moved: prev ? prev.moved : 0, multi: prev ? prev.multi : false };
+}
+function centroid() { let x = 0, y = 0; for (const p of pts.values()) { x += p.x; y += p.y; } const n = pts.size || 1; return { x: x / n, y: y / n }; }
+function spread() { const a = [...pts.values()]; return a.length < 2 ? 0 : Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); }
+
+function tapAt(sx, sy) {
+  const x = (sx - cam.x) / cam.s, y = (sy - cam.y) / cam.s;
+  if (x < 0 || y < 0 || x >= img.width || y >= img.height) return;
+  sel = snap(x, y); matches = [];
+  $('findBtn').disabled = false;
+  drawTpl(); updateStatus(); render();
+}
+
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+$('nudge').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b || !sel) return;
+  const [dx, dy] = b.dataset.d.split(',').map(Number);
+  if (dx === 0 && dy === 0) sel = snap(sel.x, sel.y);
+  else { sel.x += dx * pitchD * 0.08; sel.y += dy * pitchD * 0.08; }
+  matches = []; drawTpl(); updateStatus(); render();
+});
+$('thr').addEventListener('input', () => { $('thrV').textContent = (+$('thr').value).toFixed(2); updateStatus(); render(); });
+$('box').addEventListener('input', () => { $('boxV').textContent = (+$('box').value).toFixed(2); matches = []; drawTpl(); updateStatus(); render(); });
+$('fitBtn').addEventListener('click', fit);
+$('clearBtn').addEventListener('click', () => { sel = null; matches = []; $('findBtn').disabled = true; drawTpl(); updateStatus(); render(); });
+window.addEventListener('resize', () => { resize(); });
+
+function setStatus(h) { $('status').innerHTML = h; }
+function busy(msg) { const b = $('busy'); if (msg) { b.textContent = msg; b.style.display = 'block'; } else b.style.display = 'none'; }
+
+resize();
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
